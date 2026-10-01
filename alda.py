@@ -20,29 +20,33 @@ from torch import distributions as D
 from PIL import Image
 os.environ.setdefault("MUJOCO_GL", "egl")  # headless; must be set before dm_control is imported
 from dm_control import suite  # noqa: E402
-from dm_control.suite.wrappers import pixels  # noqa: E402
 
 
 # ---------------------------------------------------------------- env
 class DMCEnv:
-    """Pixel DMC: action repeat + frame stack, obs uint8 (3k, H, W)."""
+    """Pixel DMC: action repeat + frame stack, obs uint8 (3k, H, W). Renders once per agent step, not per repeat."""
 
     def __init__(self, domain, task, seed, action_repeat, frame_stack, size=64, distract=None):
         render_kwargs = dict(height=size, width=size, camera_id=2 if domain == "quadruped" else 0)
         if distract is None:
             env = suite.load(domain, task, task_kwargs={"random": seed})
-            env = pixels.Wrapper(env, pixels_only=True, render_kwargs=render_kwargs)
         else:
             from distracting_control import suite as dsuite
+            # Drop dsuite's outer pixels.Wrapper (it renders on every sub-step); distractions live in physics.
             env = dsuite.load(domain, task, task_kwargs={"random": seed},
-                              render_kwargs=render_kwargs, pixels_only=True, **distract)
+                              render_kwargs=render_kwargs, pixels_only=True, **distract)._env
         spec = env.action_spec()
         assert np.allclose(spec.minimum, -1) and np.allclose(spec.maximum, 1)
         self.env, self.action_repeat, self.ac_dim = env, action_repeat, spec.shape[0]
+        self.render_kwargs = render_kwargs
         self.frames = deque(maxlen=frame_stack)
 
+    def _frame(self):
+        return self.env.physics.render(**self.render_kwargs).transpose(2, 0, 1).copy()
+
     def reset(self):
-        frame = self.env.reset().observation["pixels"].transpose(2, 0, 1).copy()
+        self.env.reset()
+        frame = self._frame()
         for _ in range(self.frames.maxlen):
             self.frames.append(frame)
         return np.concatenate(self.frames)
@@ -54,7 +58,7 @@ class DMCEnv:
             rew += ts.reward or 0.0
             if ts.last():
                 break
-        self.frames.append(ts.observation["pixels"].transpose(2, 0, 1).copy())
+        self.frames.append(self._frame())
         return np.concatenate(self.frames), rew, ts.discount == 0, ts.last()
 
 
@@ -83,9 +87,8 @@ class ReplayBuffer:
         idx = np.random.randint(0, self.size, batch_size)
         back = np.maximum(np.arange(1 - self.k, 1)[None], -self.t[idx, None])  # clamp at episode start, like reset()
         obs = self.frames[(idx[:, None] + back) % self.capacity]                 # (B, k, C, H, W)
-        next_obs = np.concatenate([obs[:, 1:], self.next_frames[idx, None]], 1)
-        B = batch_size
-        out = dict(obs=obs.reshape(B, -1, *obs.shape[-2:]), next_obs=next_obs.reshape(B, -1, *obs.shape[-2:]),
+        # next_obs = obs[:, 1:] + next_frame; the agent reuses obs latents instead of re-encoding k-1 frames
+        out = dict(obs=obs.reshape(batch_size, -1, *obs.shape[-2:]), next_frame=self.next_frames[idx],
                    acs=self.acs[idx], rews=self.rews[idx], dones=self.dones[idx])
         return {k: torch.as_tensor(v, device=device) for k, v in out.items()}
 
@@ -232,9 +235,10 @@ class ALDAAgent(nn.Module):
         self, ac_dim,
         frame_stack=3, n_latents=12, n_values=12, beta=100.0, feature_dim=50,
         discount=0.99, init_temperature=0.1, num_critics=2, target_update_rate=0.005,
-        lr=1e-3, alpha_lr=1e-4, weight_decay=0.1, actor_update_freq=2, target_update_freq=2,
+        lr=1e-3, alpha_lr=1e-4, weight_decay=0.1, actor_update_freq=2, target_update_freq=2, amp=True,
     ):
         super().__init__()
+        self.amp = amp  # bf16 autocast for encoder/decoder only; latent model, critic, actor stay fp32
         self.k, self.n_z = frame_stack, n_latents
         self.encoder, self.decoder = Encoder(n_latents), Decoder(n_latents)
         self.latent = AssociativeLatent(n_latents, n_values, beta)
@@ -262,10 +266,19 @@ class ALDAAgent(nn.Module):
     def alpha(self):
         return self.log_alpha.exp()
 
+    def _autocast(self):
+        return torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp and self.log_alpha.is_cuda)
+
     def encode(self, obs):
         """uint8 (B, 3k, H, W) -> frames (Bk, 3, H, W) in [-0.5, 0.5], z_cont (Bk, n_z). Framestack folded into batch."""
-        x = obs.float().div(255).sub(0.5).view(-1, 3, *obs.shape[-2:])
-        return x, self.encoder(x)
+        x = obs.float().div(255).sub(0.5).view(-1, 3, *obs.shape[-2:]).contiguous(memory_format=torch.channels_last)
+        with self._autocast():
+            z = self.encoder(x)
+        return x, z.float()
+
+    def decode(self, z):
+        with self._autocast():
+            return self.decoder(z).float()
 
     def history(self, z_d, critic):
         return critic.history(z_d.view(-1, self.k, self.n_z))
@@ -278,7 +291,7 @@ class ALDAAgent(nn.Module):
         return ac[0].cpu().numpy()
 
     def update(self, batch, step):
-        obs, acs, rews, next_obs, dones = (batch[k] for k in ("obs", "acs", "rews", "next_obs", "dones"))
+        obs, acs, rews, next_frame, dones = (batch[k] for k in ("obs", "acs", "rews", "next_frame", "dones"))
 
         # Gradient routing follows Fig. 2:
         #   J(Q): Q MLP -> z_Q linear -> 1D CNN -> latent model (codebook), stops before z_cont.
@@ -287,11 +300,13 @@ class ALDAAgent(nn.Module):
         x, z_cont = self.encode(obs)
         z_d = self.latent(z_cont.detach())
         commit_loss = F.mse_loss(z_cont, z_d.detach())
-        recon_loss = F.mse_loss(self.decoder(z_cont + (z_d - z_cont).detach()), x)
+        recon_loss = F.mse_loss(self.decode(z_cont + (z_d - z_cont).detach()), x)
 
         h = self.history(z_d, self.critic)
         with torch.no_grad():
-            next_z_d = self.latent(self.encode(next_obs)[1])
+            # next_obs = obs[:, 1:] + next_frame: reuse the k-1 shared frame latents, encode only the new frame
+            next_z_d = torch.cat([z_d.view(-1, self.k, self.n_z)[:, 1:],
+                                  self.latent(self.encode(next_frame)[1])[:, None]], 1).detach()
             next_dist = self.actor(self.history(next_z_d, self.critic))
             next_acs = next_dist.sample()
             next_q = self.target_critic(self.history(next_z_d, self.target_critic), next_acs).min(0).values
@@ -336,7 +351,7 @@ class ALDAAgent(nn.Module):
         for chunk in torch.as_tensor(frames).split(256):
             x, z = self.encode(chunk.to(dev))
             d = self.latent(z)
-            zc.append(z), zd.append(d), mse.append(((self.decoder(d) - x) ** 2).mean((1, 2, 3)))
+            zc.append(z), zd.append(d), mse.append(((self.decode(d) - x) ** 2).mean((1, 2, 3)))
         zc, zd = torch.cat(zc), torch.cat(zd)
         p = F.one_hot((zc[..., None] - values).abs().argmin(-1), values.shape[1]).float().mean(0)  # (n_z, n_v)
         return {
@@ -350,7 +365,7 @@ class ALDAAgent(nn.Module):
     def recon_grid(self, frames):
         """uint8 (n, 3, H, W) -> image: originals (top row) over reconstructions."""
         x, z = self.encode(torch.as_tensor(frames, device=self.log_alpha.device))
-        return to_grid(torch.stack([x, self.decoder(self.latent(z))]))
+        return to_grid(torch.stack([x, self.decode(self.latent(z))]))
 
     @torch.no_grad()
     def traversal_grid(self, frame):
@@ -361,7 +376,7 @@ class ALDAAgent(nn.Module):
         zs = self.latent(z)[0].repeat(n_z, n_v, 1)  # (n_z, n_v, n_z)
         idx = torch.arange(n_z)
         zs[idx, :, idx] = vals
-        return to_grid(self.decoder(zs.view(-1, n_z)).view(n_z, n_v, *frame.shape))
+        return to_grid(self.decode(zs.view(-1, n_z)).view(n_z, n_v, *frame.shape))
 
     @torch.no_grad()
     def update_targets(self):
@@ -441,6 +456,9 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True  # fixed input shapes
 
     env = DMCEnv(domain, task, args.seed, ar, args.frame_stack)
     eval_envs = {"train": DMCEnv(domain, task, args.seed + 100, ar, args.frame_stack)}
@@ -448,7 +466,7 @@ def main():
         eval_envs[name] = DMCEnv(domain, task, args.seed + 100, ar, args.frame_stack,
                                  distract=dict(background_dataset_path=args.davis_path, **distract))
 
-    agent = ALDAAgent(env.ac_dim, args.frame_stack, **args.agent).to(device)
+    agent = ALDAAgent(env.ac_dim, args.frame_stack, **args.agent).to(device, memory_format=torch.channels_last)
     buffer = ReplayBuffer(args.buffer_size, (3, 64, 64), env.ac_dim, args.frame_stack)
 
     run_dir = os.path.join(args.run_dir, f"{args.env_id}_s{args.seed}_{int(time.time())}")

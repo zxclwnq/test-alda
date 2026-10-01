@@ -1,5 +1,5 @@
 # Paper hyperparameters (Appendix table) unless noted.
-env_id: walker-walk          # <domain>-<task>
+env_id: ball_in_cup-catch          # <domain>-<task>
 seed: 1
 total_env_steps: 1000000     # counted before action repeat; paper curves go to 1e6
 random_steps: 1000           # agent steps of uniform-random actions
