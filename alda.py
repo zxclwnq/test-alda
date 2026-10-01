@@ -18,8 +18,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributions as D
 from PIL import Image
-from dm_control import suite
-from dm_control.suite.wrappers import pixels
+os.environ.setdefault("MUJOCO_GL", "egl")  # headless; must be set before dm_control is imported
+from dm_control import suite  # noqa: E402
+from dm_control.suite.wrappers import pixels  # noqa: E402
 
 
 # ---------------------------------------------------------------- env
@@ -244,11 +245,12 @@ class ALDAAgent(nn.Module):
         self.target_entropy = -ac_dim
 
         # Critic and ALDA losses touch disjoint params, so one optimizer on their sum is equivalent to two.
-        # Weight decay (lambda_theta, lambda_phi) only on encoder/decoder.
-        self.model_opt = torch.optim.Adam([
+        # Weight decay (lambda_theta, lambda_phi) only on encoder/decoder, decoupled (AdamW, as in QLAE):
+        # coupled L2 of 0.1 in Adam swamps the reconstruction gradient and collapses the encoder to a constant.
+        self.model_opt = torch.optim.AdamW([
             {"params": self.encoder.parameters(), "weight_decay": weight_decay},
             {"params": self.decoder.parameters(), "weight_decay": weight_decay},
-            {"params": [*self.latent.parameters(), *self.critic.parameters()]},
+            {"params": [*self.latent.parameters(), *self.critic.parameters()], "weight_decay": 0.0},
         ], lr=lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=alpha_lr)
