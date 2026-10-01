@@ -1,0 +1,30 @@
+# Paper hyperparameters (Appendix table) unless noted.
+env_id: walker-walk          # <domain>-<task>
+seed: 1
+total_env_steps: 500000      # counted before action repeat
+random_steps: 1000           # agent steps of uniform-random actions
+batch_size: 128
+buffer_size: 100000          # paper: 1e6; RAM-bound here
+action_repeat: null          # null -> 2 for finger-spin, else 4
+frame_stack: 3
+eval_every: 10000            # env steps
+eval_episodes: 5
+davis_path: data/DAVIS/JPEGImages/480p   # null disables Distracting CS eval
+dcs_difficulty: easy         # easy | medium | hard
+dcs_dynamic: true           # paper: camera shaking + playing video
+run_dir: runs
+
+agent:                       # kwargs of ALDAAgent
+  n_latents: 12
+  n_values: 12
+  beta: 100.0
+  feature_dim: 50            # z_Q / z_pi size, not in paper (SAC-AE default)
+  discount: 0.99
+  init_temperature: 0.1
+  num_critics: 2
+  target_update_rate: 0.005  # not in paper (pytorch_sac default)
+  lr: 1.0e-3
+  alpha_lr: 1.0e-4
+  weight_decay: 0.1
+  actor_update_freq: 2
+  target_update_freq: 2

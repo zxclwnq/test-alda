@@ -1,0 +1,8 @@
+.claude/
+__pycache__/
+.venv/
+data/
+*.pdf
+docker/
+.dockerignore
+CLAUDE.md

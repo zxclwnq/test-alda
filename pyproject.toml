@@ -1,0 +1,11 @@
+[project]
+name = "alda"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch",
+    "dm-control",
+    "numpy",
+    "pillow",  # distracting_control background loader
+    "pyyaml",
+]
