@@ -9,9 +9,10 @@ action_repeat: null          # null -> 2 for finger-spin, else 4
 frame_stack: 3
 eval_every: 10000            # env steps
 eval_episodes: 5
-davis_path: data/DAVIS/JPEGImages/480p   # null disables Distracting CS eval
-dcs_difficulty: easy         # easy | medium | hard
-dcs_dynamic: true           # paper: camera shaking + playing video
+davis_path: data/DAVIS/JPEGImages/480p
+eval_envs:                   # name -> distracting_control.suite.load kwargs; clean "train" env is always evaluated
+  dcs: {difficulty: easy, dynamic: true, background_dataset_videos: val}   # paper: camera shaking + playing video
+  color: {color_kwargs: {max_delta: 0.5, step_std: 0.0}}                  # stand-in for DMCGB "color hard"
 run_dir: runs
 
 agent:                       # kwargs of ALDAAgent

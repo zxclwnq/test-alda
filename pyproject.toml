@@ -8,4 +8,5 @@ dependencies = [
     "numpy",
     "pillow",  # distracting_control background loader
     "pyyaml",
+    "tensorboard",
 ]

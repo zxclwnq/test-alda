@@ -8,7 +8,7 @@ import copy
 import csv
 import os
 import time
-from collections import deque
+from collections import defaultdict, deque
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,6 +17,7 @@ import yaml
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributions as D
+from PIL import Image
 from dm_control import suite
 from dm_control.suite.wrappers import pixels
 
@@ -326,21 +327,95 @@ class ALDAAgent(nn.Module):
         return {"actor_loss": actor_loss.item(), "entropy": -log_prob.mean().item(), "alpha": self.alpha.item()}
 
     @torch.no_grad()
+    def latent_stats(self, frames):
+        """uint8 (N, 3, H, W) -> how far encoder outputs sit from the memories, i.e. how much association acts."""
+        dev, values = self.log_alpha.device, self.latent.values
+        zc, zd, mse = [], [], []
+        for chunk in torch.as_tensor(frames).split(256):
+            x, z = self.encode(chunk.to(dev))
+            d = self.latent(z)
+            zc.append(z), zd.append(d), mse.append(((self.decoder(d) - x) ** 2).mean((1, 2, 3)))
+        zc, zd = torch.cat(zc), torch.cat(zd)
+        p = F.one_hot((zc[..., None] - values).abs().argmin(-1), values.shape[1]).float().mean(0)  # (n_z, n_v)
+        return {
+            "assoc_l1": (zc - zd).abs().mean().item(),  # mean |z_cont - z_d|: shift applied by association
+            "z_out_of_range": ((zc < values.min(-1).values) | (zc > values.max(-1).values)).float().mean().item(),
+            "code_usage_entropy": (-(p * p.clamp_min(1e-12).log()).sum(-1).mean() / np.log(values.shape[1])).item(),
+            "recon_mse": torch.cat(mse).mean().item(),
+        }
+
+    @torch.no_grad()
+    def recon_grid(self, frames):
+        """uint8 (n, 3, H, W) -> image: originals (top row) over reconstructions."""
+        x, z = self.encode(torch.as_tensor(frames, device=self.log_alpha.device))
+        return to_grid(torch.stack([x, self.decoder(self.latent(z))]))
+
+    @torch.no_grad()
+    def traversal_grid(self, frame):
+        """Paper Fig. 5: row i sweeps latent i over its sorted codebook, others fixed at z_d(frame)."""
+        _, z = self.encode(torch.as_tensor(frame[None], device=self.log_alpha.device))
+        vals = self.latent.values.sort(-1).values  # (n_z, n_v)
+        n_z, n_v = vals.shape
+        zs = self.latent(z)[0].repeat(n_z, n_v, 1)  # (n_z, n_v, n_z)
+        idx = torch.arange(n_z)
+        zs[idx, :, idx] = vals
+        return to_grid(self.decoder(zs.view(-1, n_z)).view(n_z, n_v, *frame.shape))
+
+    @torch.no_grad()
     def update_targets(self):
         for t, s in zip(self.target_critic.parameters(), self.critic.parameters()):
             t.lerp_(s, self.tau)
 
 
-# ---------------------------------------------------------------- train / eval
+# ---------------------------------------------------------------- logging / eval
+def to_grid(imgs):
+    """(rows, cols, 3, H, W) in [-0.5, 0.5] -> uint8 (rows*H, cols*W, 3)."""
+    r, c, _, h, w = imgs.shape
+    return ((imgs.clamp(-0.5, 0.5) + 0.5) * 255).byte().permute(0, 3, 1, 4, 2).reshape(r * h, c * w, 3).cpu().numpy()
+
+
+TRAIN_FIELDS = ["env_step", "episode_return", "fps",
+                "critic_loss", "q", "commit_loss", "recon_loss", "actor_loss", "entropy", "alpha"]
+EVAL_FIELDS = ["env_step", "env", "return_mean", "return_std",
+               "assoc_l1", "z_out_of_range", "code_usage_entropy", "recon_mse"]
+
+
+class Logger:
+    """CSVs in the run dir are the source of truth for report figures; TensorBoard mirrors them live.
+    Images (reconstructions, latent traversals) are overwritten as PNGs and kept per step in TensorBoard."""
+
+    def __init__(self, run_dir):
+        from torch.utils.tensorboard import SummaryWriter
+        self.run_dir, self.tb, self.writers = run_dir, SummaryWriter(run_dir), {}
+
+    def row(self, name, fields, data):
+        if name not in self.writers:
+            f = open(os.path.join(self.run_dir, f"{name}.csv"), "w", buffering=1)
+            self.writers[name] = csv.DictWriter(f, fields, restval="")
+            self.writers[name].writeheader()
+        self.writers[name].writerow(data)
+        prefix = f"{name}_{data['env']}" if "env" in data else name
+        for k, v in data.items():
+            if isinstance(v, float):
+                self.tb.add_scalar(f"{prefix}/{k}", v, data["env_step"])
+
+    def image(self, name, img, step):
+        Image.fromarray(img).save(os.path.join(self.run_dir, f"{name}.png"))
+        self.tb.add_image(name, img, step, dataformats="HWC")
+
+
 def evaluate(agent, env, n_episodes):
-    returns = []
+    returns, frames = [], []
     for _ in range(n_episodes):
         ob, done, ret = env.reset(), False, 0.0
         while not done:
+            frames.append(ob[-3:])
             ob, rew, _, done = env.step(agent.act(ob, sample=False))
             ret += rew
         returns.append(ret)
-    return float(np.mean(returns))
+    frames = np.stack(frames)
+    return {"return_mean": float(np.mean(returns)), "return_std": float(np.std(returns)),
+            **agent.latent_stats(frames)}, frames
 
 
 def main():
@@ -367,10 +442,9 @@ def main():
 
     env = DMCEnv(domain, task, args.seed, ar, args.frame_stack)
     eval_envs = {"train": DMCEnv(domain, task, args.seed + 100, ar, args.frame_stack)}
-    if args.davis_path:
-        eval_envs["dcs"] = DMCEnv(domain, task, args.seed + 100, ar, args.frame_stack, distract=dict(
-            difficulty=args.dcs_difficulty, dynamic=args.dcs_dynamic,
-            background_dataset_path=args.davis_path, background_dataset_videos="val"))
+    for name, distract in (args.eval_envs or {}).items():
+        eval_envs[name] = DMCEnv(domain, task, args.seed + 100, ar, args.frame_stack,
+                                 distract=dict(background_dataset_path=args.davis_path, **distract))
 
     agent = ALDAAgent(env.ac_dim, args.frame_stack, **args.agent).to(device)
     buffer = ReplayBuffer(args.buffer_size, (3, 64, 64), env.ac_dim, args.frame_stack)
@@ -379,35 +453,42 @@ def main():
     os.makedirs(run_dir)
     with open(os.path.join(run_dir, "config.yaml"), "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
-    log = csv.writer(open(os.path.join(run_dir, "eval.csv"), "w", buffering=1))
-    log.writerow(["env_step", *eval_envs])
+    log = Logger(run_dir)
 
-    ob, t, ep_ret, info, start = env.reset(), 0, 0.0, {}, time.time()
+    def run_eval(env_step):
+        for name, e in eval_envs.items():
+            stats, frames = evaluate(agent, e, args.eval_episodes)
+            log.row("eval", EVAL_FIELDS, {"env_step": env_step, "env": name, **stats})
+            log.image(f"recon_{name}", agent.recon_grid(frames[np.linspace(0, len(frames) - 1, 8).astype(int)]), env_step)
+            if name == "train":
+                log.image("traversal", agent.traversal_grid(frames[len(frames) // 2]), env_step)
+            print(f"[eval] step {env_step} {name}: " + " ".join(f"{k}={v:.3g}" for k, v in stats.items()), flush=True)
+        torch.save(agent.state_dict(), os.path.join(run_dir, "agent.pt"))
+
+    ob, t, ep_ret, ep_info, start = env.reset(), 0, 0.0, defaultdict(list), time.time()
     for step in range(args.total_env_steps // ar):
         env_step = step * ar
         if env_step % args.eval_every == 0:
-            res = {name: evaluate(agent, e, args.eval_episodes) for name, e in eval_envs.items()}
-            log.writerow([env_step, *res.values()])
-            torch.save(agent.state_dict(), os.path.join(run_dir, "agent.pt"))
-            print(f"[eval] step {env_step} " + " ".join(f"{k}={v:.1f}" for k, v in res.items()), flush=True)
+            run_eval(env_step)
 
         ac = np.random.uniform(-1, 1, env.ac_dim).astype(np.float32) if step < args.random_steps else agent.act(ob)
         next_ob, rew, terminated, truncated = env.step(ac)
         buffer.insert(ob, ac, rew, next_ob, float(terminated), t)  # truncation does not cut the bootstrap
         ob, t, ep_ret = next_ob, t + 1, ep_ret + rew
         if terminated or truncated:
-            fps = env_step / (time.time() - start)
-            print(f"step {env_step} return {ep_ret:.1f} fps {fps:.0f} "
-                  + " ".join(f"{k}={v:.3g}" for k, v in info.items()), flush=True)
+            row = {"env_step": env_step, "episode_return": float(ep_ret), "fps": env_step / (time.time() - start),
+                   **{k: float(np.mean(v)) for k, v in ep_info.items()}}
+            log.row("train", TRAIN_FIELDS, row)
+            print(" ".join(f"{k}={v:.3g}" for k, v in row.items()), flush=True)
             ob, t, ep_ret = env.reset(), 0, 0.0
+            ep_info.clear()
 
         if step >= args.random_steps:
-            info = agent.update(buffer.sample(args.batch_size, device), step)
+            for k, v in agent.update(buffer.sample(args.batch_size, device), step).items():
+                ep_info[k].append(v)
 
-    res = {name: evaluate(agent, e, args.eval_episodes) for name, e in eval_envs.items()}
-    log.writerow([args.total_env_steps, *res.values()])
-    torch.save(agent.state_dict(), os.path.join(run_dir, "agent.pt"))
-    print("[eval] final " + " ".join(f"{k}={v:.1f}" for k, v in res.items()))
+    run_eval(args.total_env_steps)
+    log.tb.close()
 
 
 if __name__ == "__main__":
