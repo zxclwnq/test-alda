@@ -6,3 +6,12 @@ data/
 docker/
 .dockerignore
 CLAUDE.md
+runs/
+report/*.aux
+report/*.log
+report/*.out
+report/*.fls
+report/*.fdb_latexmk
+report/*.blg
+!report/*.pdf
+!report/figures/*.pdf

@@ -1,0 +1,94 @@
+\begin{thebibliography}{12}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Batra \& Sukhatme(2025)Batra and Sukhatme]{batra2024alda}
+Batra, S. and Sukhatme, G.~S.
+\newblock Zero-shot generalization of vision-based {RL} without data
+  augmentation.
+\newblock In \emph{Proceedings of the 42nd International Conference on Machine
+  Learning}, 2025.
+
+\bibitem[Haarnoja et~al.(2018)Haarnoja, Zhou, Abbeel, and
+  Levine]{haarnoja2018sac}
+Haarnoja, T., Zhou, A., Abbeel, P., and Levine, S.
+\newblock Soft actor-critic: Off-policy maximum entropy deep reinforcement
+  learning with a stochastic actor.
+\newblock In \emph{Proceedings of the 35th International Conference on Machine
+  Learning}, pp.\  1861--1870, 2018.
+
+\bibitem[Hansen et~al.(2021)Hansen, Su, and Wang]{hansen2021svea}
+Hansen, N., Su, H., and Wang, X.
+\newblock Stabilizing deep {Q}-learning with {ConvNets} and vision transformers
+  under data augmentation.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~34, pp.\  3680--3693, 2021.
+
+\bibitem[Hsu et~al.(2023)Hsu, Dorrell, Whittington, Wu, and Finn]{hsu2023qlae}
+Hsu, K., Dorrell, W., Whittington, J., Wu, J., and Finn, C.
+\newblock Disentanglement via latent quantization.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~36, pp.\  45463--45488, 2023.
+
+\bibitem[Huang et~al.(2022)Huang, Dossa, Ye, Braga, Chakraborty, Mehta, and
+  Ara{\'u}jo]{huang2022cleanrl}
+Huang, S., Dossa, R. F.~J., Ye, C., Braga, J., Chakraborty, D., Mehta, K., and
+  Ara{\'u}jo, J.~G.
+\newblock {CleanRL}: High-quality single-file implementations of deep
+  reinforcement learning algorithms.
+\newblock \emph{Journal of Machine Learning Research}, 23\penalty0
+  (274):\penalty0 1--18, 2022.
+
+\bibitem[Loshchilov \& Hutter(2019)Loshchilov and Hutter]{loshchilov2019adamw}
+Loshchilov, I. and Hutter, F.
+\newblock Decoupled weight decay regularization.
+\newblock In \emph{International Conference on Learning Representations}, 2019.
+
+\bibitem[Pont-Tuset et~al.(2017)Pont-Tuset, Perazzi, Caelles, Arbel{\'a}ez,
+  Sorkine-Hornung, and Van~Gool]{ponttuset2017davis}
+Pont-Tuset, J., Perazzi, F., Caelles, S., Arbel{\'a}ez, P., Sorkine-Hornung,
+  A., and Van~Gool, L.
+\newblock The 2017 {DAVIS} challenge on video object segmentation.
+\newblock \emph{arXiv preprint arXiv:1704.00675}, 2017.
+
+\bibitem[Ramsauer et~al.(2020)Ramsauer, Sch{\"a}fl, Lehner, Seidl, Widrich,
+  Adler, Gruber, Holzleitner, Pavlovi{\'c}, Sandve,
+  et~al.]{ramsauer2020hopfield}
+Ramsauer, H., Sch{\"a}fl, B., Lehner, J., Seidl, P., Widrich, M., Adler, T.,
+  Gruber, L., Holzleitner, M., Pavlovi{\'c}, M., Sandve, G.~K., et~al.
+\newblock Hopfield networks is all you need.
+\newblock \emph{arXiv preprint arXiv:2008.02217}, 2020.
+
+\bibitem[Stone et~al.(2021)Stone, Ramirez, Konolige, and
+  Jonschkowski]{stone2021dcs}
+Stone, A., Ramirez, O., Konolige, K., and Jonschkowski, R.
+\newblock The distracting control suite -- a challenging benchmark for
+  reinforcement learning from pixels.
+\newblock \emph{arXiv preprint arXiv:2101.02722}, 2021.
+
+\bibitem[Tassa et~al.(2018)Tassa, Doron, Muldal, Erez, Li, de~Las~Casas,
+  Budden, Abdolmaleki, Merel, Lefrancq, et~al.]{tassa2018dmc}
+Tassa, Y., Doron, Y., Muldal, A., Erez, T., Li, Y., de~Las~Casas, D., Budden,
+  D., Abdolmaleki, A., Merel, J., Lefrancq, A., et~al.
+\newblock {DeepMind} control suite.
+\newblock \emph{arXiv preprint arXiv:1801.00690}, 2018.
+
+\bibitem[Yarats et~al.(2021{\natexlab{a}})Yarats, Fergus, Lazaric, and
+  Pinto]{yarats2021drqv2}
+Yarats, D., Fergus, R., Lazaric, A., and Pinto, L.
+\newblock Mastering visual continuous control: Improved data-augmented
+  reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:2107.09645}, 2021{\natexlab{a}}.
+
+\bibitem[Yarats et~al.(2021{\natexlab{b}})Yarats, Zhang, Kostrikov, Amos,
+  Pineau, and Fergus]{yarats2021sacae}
+Yarats, D., Zhang, A., Kostrikov, I., Amos, B., Pineau, J., and Fergus, R.
+\newblock Improving sample efficiency in model-free reinforcement learning from
+  images.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial
+  Intelligence}, volume~35, pp.\  10674--10681, 2021{\natexlab{b}}.
+
+\end{thebibliography}
