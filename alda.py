@@ -75,6 +75,18 @@ class ReplayBuffer:
         self.k, self.c = frame_stack, frame_shape[0]
         self.capacity, self.size, self.ptr = capacity, 0, 0
 
+    KEYS = ("frames", "next_frames", "t", "acs", "rews", "dones")
+
+    def save(self, path):
+        with open(path, "wb") as f:  # uncompressed: frames are noise-like uint8, compression barely helps
+            np.savez(f, size=self.size, ptr=self.ptr, **{k: getattr(self, k)[:self.size] for k in self.KEYS})
+
+    def load(self, path):
+        d = np.load(path)
+        self.size, self.ptr = int(d["size"]), int(d["ptr"])
+        for k in self.KEYS:
+            getattr(self, k)[:self.size] = d[k]
+
     def insert(self, ob, ac, rew, next_ob, done, t):
         i = self.ptr
         self.frames[i], self.next_frames[i] = ob[-self.c:], next_ob[-self.c:]
@@ -401,15 +413,24 @@ class Logger:
     """CSVs in the run dir are the source of truth for report figures; TensorBoard mirrors them live.
     Images (reconstructions, latent traversals) are overwritten as PNGs and kept per step in TensorBoard."""
 
-    def __init__(self, run_dir):
+    def __init__(self, run_dir, resume_env_step=None):
         from torch.utils.tensorboard import SummaryWriter
-        self.run_dir, self.tb, self.writers = run_dir, SummaryWriter(run_dir), {}
+        self.run_dir, self.writers = run_dir, {}
+        # On resume, drop everything logged after the checkpoint so curves have no duplicate/orphan points.
+        self.tb = SummaryWriter(run_dir, purge_step=resume_env_step)
+        self.keep_before = resume_env_step
 
     def row(self, name, fields, data):
         if name not in self.writers:
-            f = open(os.path.join(self.run_dir, f"{name}.csv"), "w", buffering=1)
+            path = os.path.join(self.run_dir, f"{name}.csv")
+            kept = []
+            if self.keep_before is not None and os.path.exists(path):
+                with open(path) as f:
+                    kept = [r for r in csv.DictReader(f) if int(float(r["env_step"])) < self.keep_before]
+            f = open(path, "w", buffering=1)
             self.writers[name] = csv.DictWriter(f, fields, restval="")
             self.writers[name].writeheader()
+            self.writers[name].writerows(kept)
         self.writers[name].writerow(data)
         prefix = f"{name}_{data['env']}" if "env" in data else name
         for k, v in data.items():
@@ -469,11 +490,39 @@ def main():
     agent = ALDAAgent(env.ac_dim, args.frame_stack, **args.agent).to(device, memory_format=torch.channels_last)
     buffer = ReplayBuffer(args.buffer_size, (3, 64, 64), env.ac_dim, args.frame_stack)
 
-    run_dir = os.path.join(args.run_dir, f"{args.env_id}_s{args.seed}_{int(time.time())}")
-    os.makedirs(run_dir)
+    # Resume: `python alda.py <run>/config.yaml resume=<run> [total_env_steps=...]` continues that run in place.
+    start_step = 0
+    if args.resume:
+        run_dir = args.resume
+        ckpt = torch.load(os.path.join(run_dir, "checkpoint.pt"), map_location=device, weights_only=False)
+        agent.load_state_dict(ckpt["agent"])
+        for name in ("model_opt", "actor_opt", "alpha_opt"):
+            getattr(agent, name).load_state_dict(ckpt[name])
+        buffer.load(os.path.join(run_dir, "buffer.npz"))
+        np.random.set_state(ckpt["rng"][0])
+        torch.set_rng_state(ckpt["rng"][1].cpu())  # map_location moved it to the GPU
+        if ckpt["rng"][2] is not None and device.type == "cuda":
+            torch.cuda.set_rng_state(ckpt["rng"][2].cpu())
+        start_step = ckpt["step"]
+        print(f"resumed {run_dir} at env step {start_step * ar}, buffer {buffer.size}", flush=True)
+    else:
+        run_dir = os.path.join(args.run_dir, f"{args.env_id}_s{args.seed}_{int(time.time())}")
+        os.makedirs(run_dir)
     with open(os.path.join(run_dir, "config.yaml"), "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
-    log = Logger(run_dir)
+    log = Logger(run_dir, start_step * ar if args.resume else None)
+
+    def save_checkpoint(step):
+        """Full state (nets, optimizers, replay buffer, RNG) so the run can be resumed or extended.
+        Env episodes restart on resume; env-internal RNG is not restored."""
+        path = os.path.join(run_dir, "checkpoint.pt")
+        buffer.save(os.path.join(run_dir, "buffer.npz.tmp"))
+        torch.save({"step": step, "agent": agent.state_dict(),
+                    **{n: getattr(agent, n).state_dict() for n in ("model_opt", "actor_opt", "alpha_opt")},
+                    "rng": (np.random.get_state(), torch.get_rng_state(),
+                            torch.cuda.get_rng_state() if device.type == "cuda" else None)}, path + ".tmp")
+        os.replace(os.path.join(run_dir, "buffer.npz.tmp"), os.path.join(run_dir, "buffer.npz"))
+        os.replace(path + ".tmp", path)
 
     def run_eval(env_step):
         for name, e in eval_envs.items():
@@ -486,17 +535,19 @@ def main():
         torch.save(agent.state_dict(), os.path.join(run_dir, "agent.pt"))
 
     ob, t, ep_ret, ep_info, start = env.reset(), 0, 0.0, defaultdict(list), time.time()
-    for step in range(args.total_env_steps // ar):
+    for step in range(start_step, args.total_env_steps // ar):
         env_step = step * ar
         if env_step % args.eval_every == 0:
             run_eval(env_step)
+        if env_step % args.checkpoint_every == 0 and step > start_step:
+            save_checkpoint(step)
 
         ac = np.random.uniform(-1, 1, env.ac_dim).astype(np.float32) if step < args.random_steps else agent.act(ob)
         next_ob, rew, terminated, truncated = env.step(ac)
         buffer.insert(ob, ac, rew, next_ob, float(terminated), t)  # truncation does not cut the bootstrap
         ob, t, ep_ret = next_ob, t + 1, ep_ret + rew
         if terminated or truncated:
-            row = {"env_step": env_step, "episode_return": float(ep_ret), "fps": env_step / (time.time() - start),
+            row = {"env_step": env_step, "episode_return": float(ep_ret), "fps": (step - start_step) * ar / (time.time() - start),
                    **{k: float(np.mean(v)) for k, v in ep_info.items()}}
             log.row("train", TRAIN_FIELDS, row)
             print(" ".join(f"{k}={v:.3g}" for k, v in row.items()), flush=True)
@@ -508,6 +559,7 @@ def main():
                 ep_info[k].append(v)
 
     run_eval(args.total_env_steps)
+    save_checkpoint(args.total_env_steps // ar)
     log.tb.close()
 
 

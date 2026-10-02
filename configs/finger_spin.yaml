@@ -14,6 +14,8 @@ eval_envs:                   # name -> distracting_control.suite.load kwargs; cl
   dcs: {difficulty: easy, dynamic: true, background_dataset_videos: val}   # paper: camera shaking + playing video
   color: {color_kwargs: {max_delta: 0.5, step_std: 0.0}}                  # stand-in for DMCGB "color hard"
 run_dir: runs
+checkpoint_every: 50000      # env steps; full state (nets, optimizers, buffer) for resume/extend. Multiple of eval_every
+resume: null                 # path to a run dir to continue it (see alda.py main)
 
 agent:                       # kwargs of ALDAAgent
   n_latents: 12
